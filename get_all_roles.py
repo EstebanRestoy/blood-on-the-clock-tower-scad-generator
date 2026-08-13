@@ -1,91 +1,80 @@
+"""Download released Blood on the Clocktower character metadata.
+
+The official app data includes reminder labels and repeats a label when several
+physical copies are required.  Keeping those repetitions is important for 3D
+printing complete token sets.
+"""
+
 import json
+from pathlib import Path
+
 import requests
-from bs4 import BeautifulSoup
 
 
-def get_color_from_style(style):
-    """
-    Given a style string, return a color name.
+ROLES_URL = (
+    "https://raw.githubusercontent.com/ThePandemoniumInstitute/"
+    "botc-release/main/resources/data/roles.json"
+)
+CHARACTER_IMAGE_ROOT = "https://release.botc.app/resources/characters"
 
-    If the color is not known, return "unknown".
-    """
-    # Ugly brute force that avoids using cssutils.
-    style_declarations = style.split(';')
-    for declaration in style_declarations:
-        if declaration.strip():
-            parts = declaration.split(':', 1)
-            if len(parts) == 2 and parts[0].strip() == "color":
-                color_hex = parts[1].strip()
-
-    if color_hex == "#800080":
-        return "purple"
-    elif color_hex == "#D4AF37":
-        return "yellow"
-    elif color_hex == "#3297F4":
-        return "blue"
-    elif color_hex == "#8C0E12":
-        return "red"
-    elif color_hex == "#3f9651":
-        return "green"
-    else:
-        print(f"Unknown color: {color_hex}")
-        return "unknown"
+TEAM_COLORS = {
+    "townsfolk": "blue",
+    "outsider": "blue",
+    "minion": "red",
+    "demon": "red",
+    "traveller": "purple",
+    "fabled": "yellow",
+    "loric": "green",
+}
 
 
-def main():
-    # List of URLs to scrape roles and images from.
-    urls_to_parse = [
-        "https://wiki.bloodontheclocktower.com/Experimental",
-        "https://wiki.bloodontheclocktower.com/Trouble_Brewing",
-        "https://wiki.bloodontheclocktower.com/Sects_%26_Violets",
-        "https://wiki.bloodontheclocktower.com/Bad_Moon_Rising",
-        "https://wiki.bloodontheclocktower.com/Travellers",
-        "https://wiki.bloodontheclocktower.com/Fabled",
-        "https://wiki.bloodontheclocktower.com/Loric",
-    ]
+def character_image_url(role):
+    """Return the official app's icon URL, including alignment when required."""
+    suffix = ""
+    if role["team"] in ("townsfolk", "outsider"):
+        suffix = "_g"
+    elif role["team"] in ("minion", "demon"):
+        suffix = "_e"
+    return f"{CHARACTER_IMAGE_ROOT}/{role['edition']}/{role['id']}{suffix}.webp"
 
-    # Dictionary to hold role data.
-    # Each key is a role name and its value is a dict with the image URL and color.
-    role_dictionary = {}
-    # Process each URL in the urls_to_parse list.
-    for url in urls_to_parse:
-        # Fetch the page content.
-        response = requests.get(url)
-        if response.status_code != 200:
-            raise Exception(f"Failed to load page {url}")
 
-        # Parse the HTML content using BeautifulSoup.
-        soup = BeautifulSoup(response.text, "html.parser")
+def normalise_role(role):
+    """Convert an official role record to the generator's compact schema."""
+    team = role["team"]
+    return {
+        "id": role["id"],
+        "edition": role.get("edition", "experimental"),
+        "team": team,
+        "image": character_image_url(role),
+        "color": TEAM_COLORS.get(team, "unknown"),
+        # Do not deduplicate: repeated labels mean repeated physical tokens.
+        "reminders": list(role.get("reminders", [])),
+    }
 
-        # Each role is contained in a div with specific classes.
-        for container in soup.select("div.small-6.medium-6.large-2.columns"):
-            # Look for a span that holds the role name (using the data-role attribute).
-            role_span = container.select_one("span[data-role]")
-            # Look for the image tag that shows the role's thumbnail.
-            image_tag = container.select_one("img.thumbimage")
 
-            # If both the role name and image are found, process them.
-            if role_span and image_tag:
-                # Extract the role name, trimming any extra whitespace.
-                role_name = role_span.get_text(strip=True)
-                # Construct the full image URL by prepending the base URL.
-                image_src = "https://wiki.bloodontheclocktower.com/" + image_tag.get(
-                    "src"
-                )
-                # Determine the color for this role based on its text style.
-                color = get_color_from_style(role_span.get("style"))
-                # Save the role's data in the dictionary.
-                role_dictionary[role_name] = {"image": image_src, "color": color}
+def fetch_roles(session=requests):
+    response = session.get(ROLES_URL, timeout=30)
+    response.raise_for_status()
+    return {
+        role["name"]: normalise_role(role)
+        for role in response.json()
+        if role.get("id") and role.get("name") and role.get("team")
+    }
 
-    # Print out the collected roles with their image URLs and colors.
-    for role, data in role_dictionary.items():
-        image = data["image"]
-        color = data["color"]
-        print(f"Role: {role}, Image: {image}, Color: {color}")
 
-    # Write the resulting dictionary to a JSON file with pretty-printing.
-    with open("roles.json", "w") as role_image_color_json_file:
-        json.dump(role_dictionary, role_image_color_json_file, indent=4)
+def main(output_path="roles.json"):
+    roles = fetch_roles()
+    output_path = Path(output_path)
+    output_path.write_text(
+        json.dumps(roles, indent=4, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+
+    reminder_count = sum(len(role["reminders"]) for role in roles.values())
+    print(
+        f"Wrote {len(roles)} characters and {reminder_count} reminder tokens "
+        f"to {output_path}"
+    )
 
 
 if __name__ == "__main__":

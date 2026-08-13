@@ -1,277 +1,301 @@
-import os
+"""Generate character and reminder token SCAD/STL files."""
+
+import argparse
+from io import BytesIO
 import json
+import math
+from pathlib import Path
+import re
 import shutil
 import subprocess
-import textwrap
-import math
 
 import requests
-from solid import *
-from solid.utils import *
-from solid import scad_render_to_file
-from PIL import Image, ImageOps, ImageFont
+from PIL import Image, ImageFont
+from solid import cylinder, import_, linear_extrude, rotate, scad_render_to_file, scale
+from solid import text as scad_text
+from solid import translate, union
 
 
-# Dimensional constants in mm
+# Dimensional constants in mm. Character tokens are intentionally compatible
+# with the original project's 45 mm design; reminders use the usual small size.
 COIN_DIAMETER = 45
+REMINDER_DIAMETER = 25
 COIN_HEIGHT = 2
-LOGO_EXTRUDE_DEPTH = 0.6
 ROLE_EXTRUDE_DEPTH = 0.2
 FONT = "Dumbledor 1 Fixed"
+FONT_FILE = "assets/Dumbledor1_fixed.ttf"
 TEXT_SIZE = 4
+REMINDER_TEXT_SIZE = 3
+
+
+def find_executable(name):
+    """Find a dependency on PATH or in the project's local tool directory."""
+    executable = shutil.which(name)
+    if executable:
+        return executable
+    candidates = {
+        "potrace": [Path(".tools/potrace/potrace.exe")],
+        "openscad": [Path("C:/Program Files/OpenSCAD/openscad.exe")],
+    }
+    for candidate in candidates.get(name, []):
+        if candidate.exists():
+            return str(candidate.resolve())
+    raise FileNotFoundError(
+        f"Required executable '{name}' was not found. See README.md."
+    )
+
+
+def safe_filename(value):
+    value = re.sub(r"[^A-Za-z0-9_-]+", "_", value.strip())
+    return value.strip("_") or "token"
 
 
 def get_relative_widths_pillow(font_path, font_size, characters):
-    """
-    Calculates the relative widths of characters in a proportional font using Pillow.
-
-    Args:
-        font_path (str): The path to the font file (e.g., .ttf, .otf).
-        font_size (int): The size of the font in points.
-        characters (str): A string containing the characters to measure.
-
-
-    Returns:
-        dict: A dictionary where keys are characters and values are their widths.
-    """
+    """Return the rendered width of every character in ``characters``."""
     try:
         font = ImageFont.truetype(font_path, font_size)
-    except IOError:
+    except OSError:
         print(f"Error: Font file not found at {font_path}")
         return {}
 
-
-    widths = {}
-    for char in characters:
-        width, height = font.getbbox(char)[2:4]  # Get width from the bounding box
-        widths[char] = width
-    return widths
+    return {char: font.getbbox(char)[2] for char in characters}
 
 
-def felt_coin_model():
-    """
-    Creates the base coin model with the botc logo cut into the base
-    and small groves cut into the edge of the coin.
-    """
-    return cylinder(d=COIN_DIAMETER, h=COIN_HEIGHT)
+def felt_coin_model(diameter=COIN_DIAMETER):
+    """Create the base below the 0.2 mm inlay/overlay layer."""
+    return cylinder(d=diameter, h=COIN_HEIGHT - ROLE_EXTRUDE_DEPTH)
 
 
-def role_overlay_model(
-    role_name,
-    svg_filename,
-):
-    """
-    Creates a colored overlay model add to the coin with the role name and image.
-    """
-    # Copy the svg into the scads directory so openscad can use it
-    shutil.copy(svg_filename, "scads")
-    print(f"Copied {svg_filename} to scads directory for use in OpenSCAD.")
-
-    # Import the SVG file as a 2D shape.
-    svg_shape = import_(os.path.basename(svg_filename), convexity=10)
-
-    # Center the scaled SVG shape.
-    centering_offset = COIN_DIAMETER / 2.0
-    centered_svg = translate((-centering_offset, -centering_offset, 0))(svg_shape)
-
-    # Extrude the centered and scaled SVG shape.
-    extruded_svg = linear_extrude(height=ROLE_EXTRUDE_DEPTH)(centered_svg)
-
-    # Translate the extruded svg to the top of the coin
-    extruded_svg = translate((0, 0, COIN_HEIGHT - ROLE_EXTRUDE_DEPTH))(extruded_svg)
-
-    # --- Curved Text ---
-    # Calculate the width of characters, note that 5x the text size was found to be
-    # a good function for translating pixels of text into angle distance through
-    # trial and error.
-    printed_role_name = role_name.upper()
-    font_file = "assets/Dumbledor1_fixed.ttf"
-    relative_widths = get_relative_widths_pillow(
-        font_file, TEXT_SIZE * 5, printed_role_name
+def curved_text_model(label, diameter, text_size):
+    """Lay out a label along the lower edge of a token."""
+    printed_label = label.upper()
+    widths = get_relative_widths_pillow(
+        FONT_FILE, max(1, round(text_size * 5)), printed_label
     )
-    # Set the width of space to be 14
-    relative_widths[' '] = 14
+    if not widths:
+        raise RuntimeError(f"Unable to load token font: {FONT_FILE}")
+    widths[" "] = max(widths.get(" ", 0), round(text_size * 3.5))
 
-    radius = COIN_DIAMETER / 2 - 2  # Adjust radius to bring text closer to the edge
-    text_angle = 270  # Start at the bottom
+    steps = [
+        (widths[left] + widths[right]) / 2
+        for left, right in zip(printed_label, printed_label[1:], strict=False)
+    ]
+    # Long reminder labels are compressed around the arc instead of spilling
+    # onto the upper half of the token.
+    total_angle = sum(steps)
+    angle_scale = min(1.0, 210 / total_angle) if total_angle else 1.0
+    steps = [step * angle_scale for step in steps]
 
-    # calculate the total angle so we know where to start rendering characters
-    average_char_width = sum([relative_widths[c] for c in printed_role_name]) / len(
-        role_name
-    )
-
-    total_angle = (len(role_name) - 1) * average_char_width
-    start_angle = text_angle - total_angle / 2
-
-    text_parts = []
-    char_angle = start_angle
-    previons_width = 0
-    for i, char in enumerate(printed_role_name):
-        # Advance the position of the character except in the case of the first
-        # character where our previous width was 0.
-        # We do this by averaging the width of this character and the one before it
-        # as the angle where we render the character can be thought of the point
-        # along the curve it is rendered in the center bottom edge of the character.
-        if previons_width != 0:
-            char_angle += sum([previons_width, relative_widths[char]]) / 2.0
-
-        x = radius * math.cos(math.radians(char_angle))
-        y = radius * math.sin(math.radians(char_angle))
-
-        # Use rotate_extrude for 3D text and rotate each character so its top points outward
-        character = text(
+    angle = 270 - sum(steps) / 2
+    radius = diameter / 2 - max(1.5, text_size / 2)
+    parts = []
+    for index, char in enumerate(printed_label):
+        if index:
+            angle += steps[index - 1]
+        x = radius * math.cos(math.radians(angle))
+        y = radius * math.sin(math.radians(angle))
+        character = scad_text(
             char,
             font=FONT,
-            size=TEXT_SIZE,
+            size=text_size,
             halign="center",
             valign="bottom",
         )
-        char_3d = linear_extrude(height=ROLE_EXTRUDE_DEPTH)(character)
-        rotated_char = translate((x, y, COIN_HEIGHT - ROLE_EXTRUDE_DEPTH))(
-            rotate(a=char_angle + 90, v=[0, 0, 1])(char_3d)
-        )  # add 90 to the rotation
-        text_parts.append(rotated_char)
-        previons_width = relative_widths[char]
+        character_3d = linear_extrude(height=ROLE_EXTRUDE_DEPTH)(character)
+        parts.append(
+            translate((x, y, COIN_HEIGHT - ROLE_EXTRUDE_DEPTH))(
+                rotate(a=angle + 90, v=[0, 0, 1])(character_3d)
+            )
+        )
+    return union()(*parts)
 
-    curved_text = union()(*text_parts)
 
-    # Combine the extruded svg and text for the overlay.
-    return extruded_svg + curved_text
+def token_overlay_model(label, svg_filename, diameter, text_size, icon_scale=1.0):
+    """Create the icon and text body used as the token's second colour."""
+    # SCAD files live in nested output directories. An absolute POSIX-style
+    # path keeps OpenSCAD imports valid on Windows as well as Unix.
+    svg_path = Path(svg_filename).resolve().as_posix()
+    svg_shape = import_(svg_path, convexity=10)
+    centered_svg = scale((icon_scale, icon_scale, 1))(
+        translate((-diameter / 2, -diameter / 2, 0))(svg_shape)
+    )
+    extruded_svg = linear_extrude(height=ROLE_EXTRUDE_DEPTH)(centered_svg)
+    extruded_svg = translate((0, 0, COIN_HEIGHT - ROLE_EXTRUDE_DEPTH))(extruded_svg)
+    return extruded_svg + curved_text_model(label, diameter, text_size)
+
+
+def role_overlay_model(role_name, svg_filename):
+    """Create a 45 mm character-token overlay."""
+    return token_overlay_model(role_name, svg_filename, COIN_DIAMETER, TEXT_SIZE)
+
+
+def reminder_overlay_model(reminder_label, svg_filename):
+    """Create a 25 mm reminder-token overlay."""
+    size = REMINDER_TEXT_SIZE
+    if len(reminder_label) > 18:
+        size = 2.1
+    elif len(reminder_label) > 12:
+        size = 2.5
+    return token_overlay_model(
+        reminder_label, svg_filename, REMINDER_DIAMETER, size, icon_scale=0.72
+    )
 
 
 def download_png(url, filename):
-    """
-    Downloads a PNG image from the provided URL and saves it to 'filename'.
-    """
-    r = requests.get(url)
-    if r.status_code == 200:
-        with open(filename, "wb") as f:
-            f.write(r.content)
-        print(f"Downloaded {filename}")
-    else:
-        raise Exception(f"Failed to download {url}")
+    """Download an image and normalize it to an RGBA PNG."""
+    response = requests.get(url, timeout=30)
+    response.raise_for_status()
+    image = Image.open(BytesIO(response.content)).convert("RGBA")
+    image.save(filename, format="PNG")
+    print(f"Downloaded {filename}")
 
 
 def convert_png_to_greyscale_png(png_path, greyscale_png_path):
-    """
-    Converts a PNG image to a greyscale version.
-    The conversion composites the PNG on a white background (removing transparency)
-    and then converts it to greyscale before saving.
-    """
-    img = Image.open(png_path).convert("RGBA")
-    background = Image.new("RGBA", img.size, (255, 255, 255))
-    composite = Image.alpha_composite(background, img)
-    greyscale_img = composite.convert("L")
-    greyscale_img.save(greyscale_png_path)
-    print(f"Converted {png_path} to {greyscale_png_path}")
+    """Composite transparency on white and save a grayscale image."""
+    image = Image.open(png_path).convert("RGBA")
+    background = Image.new("RGBA", image.size, (255, 255, 255, 255))
+    composite = Image.alpha_composite(background, image)
+    composite.convert("L").save(greyscale_png_path)
 
 
-def convert_to_svg_with_potrace(png_path, svg_path):
-    """
-    Converts a PNG image to an svg file using ImageMagick and Potrace.
-    Requires ImageMagick and Potrace to be installed and in the system's PATH.
-    """
-    try:
-        # 1. Convert PNG to PBM (Portable Bitmap) using ImageMagick
-        pbm_path = png_path.replace(".png", ".pbm")  # Create a .pbm filename
-        subprocess.run(
-            [
-                "convert",
-                png_path,
-                "-monochrome",
-                pbm_path,
-            ],  # "-monochrome" for black/white
-            check=True,
-            capture_output=True,
-        )
-        print(f"Converted {png_path} to {pbm_path}")
-
-        dimension = "{:.2f}cm".format(COIN_DIAMETER / 10)
-
-        # 2. Convert PBM to svg using Potrace
-        subprocess.run(
-            [
-                "potrace",
-                pbm_path,
-                "-o",
-                svg_path,
-                "--svg",
-                "-W",
-                dimension,
-                "-H",
-                dimension,
-            ],
-            check=True,
-            capture_output=True,
-        )
-        print(f"Converted {pbm_path} to {svg_path} using Potrace")
-
-    except subprocess.CalledProcessError as e:
-        print(f"Error converting to svg: {e.stderr.decode()}")
-    except FileNotFoundError as e:
-        print(
-            f"Error: {e.strerror}.  Please ensure ImageMagick and Potrace are installed and in your PATH."
-        )
+def convert_to_svg_with_potrace(png_path, svg_path, diameter=COIN_DIAMETER):
+    """Threshold an image with Pillow and vectorize it with Potrace."""
+    pbm_path = str(Path(png_path).with_suffix(".pbm"))
+    image = Image.open(png_path).convert("L")
+    # Pillow writes a valid monochrome PBM, avoiding ImageMagick's conflicting
+    # ``convert`` executable on Windows.
+    image.point(lambda pixel: 0 if pixel < 128 else 255, mode="1").save(pbm_path)
+    dimension = f"{diameter / 10:.2f}cm"
+    subprocess.run(
+        [
+            find_executable("potrace"),
+            pbm_path,
+            "-o",
+            str(svg_path),
+            "--svg",
+            "-W",
+            dimension,
+            "-H",
+            dimension,
+        ],
+        check=True,
+        capture_output=True,
+    )
 
 
 def export_coin_to_stl(model, scad_filename="coin.scad", stl_filename="coin.stl"):
-    # Convert SCAD to STL using OpenSCAD CLI
+    """Render an existing SCAD file to STL with OpenSCAD."""
+    stl_path = Path(stl_filename)
+    stl_path.unlink(missing_ok=True)
     result = subprocess.run(
-        ["openscad", "-o", stl_filename, scad_filename], capture_output=True
+        [find_executable("openscad"), "-o", str(stl_path), str(scad_filename)],
+        capture_output=True,
+    )
+    stderr = result.stderr.decode(errors="replace")
+    if result.returncode or "ERROR:" in stderr or not stl_path.exists():
+        raise RuntimeError(stderr or "OpenSCAD failed to create the STL")
+
+
+def render_model(model, scad_path, stl_path):
+    scad_render_to_file(model, str(scad_path), file_header="$fn=100;")
+    export_coin_to_stl(model, scad_path, stl_path)
+
+
+def prepare_role_icon(role_name, data):
+    role_safe = safe_filename(role_name)
+    png_path = Path("pngs") / f"{role_safe}.png"
+    gray_path = Path("grey_pngs") / f"{role_safe}.png"
+    character_svg = Path("svgs") / f"{role_safe}_character.svg"
+    reminder_svg = Path("svgs") / f"{role_safe}_reminder.svg"
+
+    if not png_path.exists():
+        download_png(data["image"], png_path)
+    convert_png_to_greyscale_png(png_path, gray_path)
+    if not character_svg.exists():
+        convert_to_svg_with_potrace(gray_path, character_svg, COIN_DIAMETER)
+    if data.get("reminders") and not reminder_svg.exists():
+        convert_to_svg_with_potrace(gray_path, reminder_svg, REMINDER_DIAMETER)
+    return character_svg, reminder_svg
+
+
+def generate_character(role_name, data, svg_path):
+    role_safe = safe_filename(role_name)
+    overlay = role_overlay_model(role_name, svg_path)
+    render_model(
+        overlay,
+        Path("scads/characters") / f"{role_safe}_overlay.scad",
+        Path("stls/characters") / f"{data['color']}_{role_safe}_overlay.stl",
     )
 
-    if result.returncode == 0:
-        print(f"✅ STL exported successfully: {stl_filename}")
-    else:
-        print("❌ Error generating STL")
-        print(result.stderr.decode())
 
+def generate_reminders(role_name, data, svg_path):
+    role_safe = safe_filename(role_name)
+    totals = {}
+    for label in data.get("reminders", []):
+        totals[label] = totals.get(label, 0) + 1
 
-def main():
-    with open("roles.json") as f:
-        roles = json.load(f)
-
-    os.makedirs("pngs", exist_ok=True)
-    os.makedirs("grey_pngs", exist_ok=True)
-    os.makedirs("svgs", exist_ok=True)
-    os.makedirs("scads", exist_ok=True)
-    os.makedirs("stls", exist_ok=True)
-
-    base_model = felt_coin_model()
-    base_scad_filename = os.path.join("scads", f"000_coin_base_2mm_felt.scad")
-    base_stl_filename = os.path.join("stls", f"000_coin_base_2mm_felt.stl")
-    scad_render_to_file(base_model, base_scad_filename, file_header="$fn=100;")
-    export_coin_to_stl(base_model, base_scad_filename, base_stl_filename)
-    print("Generated the base coin scad and stl")
-
-    for role, data in roles.items():
-        color = data["color"]
-        role_safe = role.replace(" ", "_").replace("'", "")
-        png_filename = os.path.join("pngs", f"{role_safe}.png")
-        grey_png_filename = os.path.join("grey_pngs", f"{role_safe}.png")
-        svg_filename = os.path.join("svgs", f"{role_safe}.svg")
-        overlay_scad_filename = os.path.join("scads", f"{role_safe}_coin_overlay.scad")
-        overlay_stl_filename = os.path.join(
-            "stls", f"{color}_{role_safe}_coin_overlay.stl"
+    seen = {}
+    for label in data.get("reminders", []):
+        seen[label] = seen.get(label, 0) + 1
+        suffix = f"_{seen[label]:02d}" if totals[label] > 1 else ""
+        token_name = f"{role_safe}__{safe_filename(label)}{suffix}"
+        overlay = reminder_overlay_model(label, svg_path)
+        render_model(
+            overlay,
+            Path("scads/reminders") / f"{token_name}_overlay.scad",
+            Path("stls/reminders") / f"{data['color']}_{token_name}_overlay.stl",
         )
 
-        if not os.path.exists(png_filename):
-            download_png(data["image"], png_filename)
-        convert_png_to_greyscale_png(png_filename, grey_png_filename)
 
-        # Convert the grayscale PNG to svg using ImageMagick and Potrace
-        convert_to_svg_with_potrace(grey_png_filename, svg_filename)
+def main(target="all", role_filter=None):
+    roles = json.loads(Path("roles.json").read_text(encoding="utf-8"))
+    for directory in (
+        "pngs",
+        "grey_pngs",
+        "svgs",
+        "scads/characters",
+        "scads/reminders",
+        "stls/characters",
+        "stls/reminders",
+    ):
+        Path(directory).mkdir(parents=True, exist_ok=True)
 
-        overlay_model = role_overlay_model(role, svg_filename)
-
-        scad_render_to_file(
-            overlay_model, overlay_scad_filename, file_header="$fn=100;"
+    if target in ("all", "characters"):
+        render_model(
+            felt_coin_model(COIN_DIAMETER),
+            Path("scads/character_base.scad"),
+            Path("stls/character_base.stl"),
         )
-        print(f"Generated {overlay_scad_filename} for role {role} overlay")
+    if target in ("all", "reminders"):
+        render_model(
+            felt_coin_model(REMINDER_DIAMETER),
+            Path("scads/reminder_base.scad"),
+            Path("stls/reminder_base.stl"),
+        )
 
-        export_coin_to_stl(overlay_model, overlay_scad_filename, overlay_stl_filename)
-        print(f"Generated {overlay_stl_filename} for role {role} overlay")
+    for role_name, data in roles.items():
+        if role_filter and role_name.casefold() != role_filter.casefold():
+            continue
+        if target == "reminders" and not data.get("reminders"):
+            continue
+        character_svg, reminder_svg = prepare_role_icon(role_name, data)
+        if target in ("all", "characters"):
+            generate_character(role_name, data, character_svg)
+        if target in ("all", "reminders") and data.get("reminders"):
+            generate_reminders(role_name, data, reminder_svg)
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--target",
+        choices=("all", "characters", "reminders"),
+        default="all",
+        help="Select which token family to generate (default: all).",
+    )
+    parser.add_argument(
+        "--role",
+        help="Generate only one role (case-insensitive), useful for test prints.",
+    )
+    args = parser.parse_args()
+    main(args.target, args.role)
