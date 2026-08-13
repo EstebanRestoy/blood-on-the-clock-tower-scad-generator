@@ -36,6 +36,15 @@ different colours in a slicer; their assembled height is 2 mm.
    python solid_maker.py --target characters
    ```
 
+   Run several roles in parallel (four workers is a good starting point):
+
+   ```bash
+   python solid_maker.py --target reminders --jobs 4
+   ```
+
+   Existing non-empty STL files are skipped, so an interrupted run resumes
+   without rebuilding completed tokens.
+
    For a quick test print of one character and its reminders:
 
    ```bash

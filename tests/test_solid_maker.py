@@ -62,7 +62,7 @@ def test_generate_reminders_preserves_duplicate_quantities(tmp_path, monkeypatch
     monkeypatch.setattr(
         solid_maker,
         "render_model",
-        lambda model, scad, stl: rendered.append((str(scad), str(stl))),
+        lambda model, scad, stl: not rendered.append((str(scad), str(stl))),
     )
 
     solid_maker.generate_reminders(
@@ -75,6 +75,21 @@ def test_generate_reminders_preserves_duplicate_quantities(tmp_path, monkeypatch
     assert any("Dead_01" in name for name in names)
     assert any("Dead_02" in name for name in names)
     assert any("Alive" in name for name in names)
+
+
+def test_render_model_skips_existing_stl(tmp_path, monkeypatch):
+    stl_path = tmp_path / "finished.stl"
+    stl_path.write_bytes(b"completed")
+    render = MagicMock()
+    export = MagicMock()
+    monkeypatch.setattr(solid_maker, "scad_render_to_file", render)
+    monkeypatch.setattr(solid_maker, "export_coin_to_stl", export)
+
+    created = solid_maker.render_model(MagicMock(), tmp_path / "token.scad", stl_path)
+
+    assert created is False
+    render.assert_not_called()
+    export.assert_not_called()
 
 
 def test_roles_json_reminder_arrays_are_not_deduplicated(tmp_path):

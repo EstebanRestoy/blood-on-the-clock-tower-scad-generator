@@ -1,6 +1,7 @@
 """Generate character and reminder token SCAD/STL files."""
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from io import BytesIO
 import json
 import math
@@ -196,9 +197,14 @@ def export_coin_to_stl(model, scad_filename="coin.scad", stl_filename="coin.stl"
         raise RuntimeError(stderr or "OpenSCAD failed to create the STL")
 
 
-def render_model(model, scad_path, stl_path):
+def render_model(model, scad_path, stl_path, force=False):
+    """Render one model, or reuse an existing non-empty STL."""
+    stl_path = Path(stl_path)
+    if not force and stl_path.exists() and stl_path.stat().st_size > 0:
+        return False
     scad_render_to_file(model, str(scad_path), file_header="$fn=100;")
     export_coin_to_stl(model, scad_path, stl_path)
+    return True
 
 
 def prepare_role_icon(role_name, data):
@@ -221,16 +227,19 @@ def prepare_role_icon(role_name, data):
 def generate_character(role_name, data, svg_path):
     role_safe = safe_filename(role_name)
     overlay = role_overlay_model(role_name, svg_path)
-    render_model(
-        overlay,
-        Path("scads/characters") / f"{role_safe}_overlay.scad",
-        Path("stls/characters") / f"{data['color']}_{role_safe}_overlay.stl",
+    return int(
+        render_model(
+            overlay,
+            Path("scads/characters") / f"{role_safe}_overlay.scad",
+            Path("stls/characters") / f"{data['color']}_{role_safe}_overlay.stl",
+        )
     )
 
 
 def generate_reminders(role_name, data, svg_path):
     role_safe = safe_filename(role_name)
     totals = {}
+    generated = 0
     for label in data.get("reminders", []):
         totals[label] = totals.get(label, 0) + 1
 
@@ -240,14 +249,28 @@ def generate_reminders(role_name, data, svg_path):
         suffix = f"_{seen[label]:02d}" if totals[label] > 1 else ""
         token_name = f"{role_safe}__{safe_filename(label)}{suffix}"
         overlay = reminder_overlay_model(label, svg_path)
-        render_model(
-            overlay,
-            Path("scads/reminders") / f"{token_name}_overlay.scad",
-            Path("stls/reminders") / f"{data['color']}_{token_name}_overlay.stl",
+        generated += int(
+            render_model(
+                overlay,
+                Path("scads/reminders") / f"{token_name}_overlay.scad",
+                Path("stls/reminders") / f"{data['color']}_{token_name}_overlay.stl",
+            )
         )
+    return generated
 
 
-def main(target="all", role_filter=None):
+def generate_role(role_name, data, target):
+    """Generate all requested files for one role; safe to run in a worker."""
+    character_svg, reminder_svg = prepare_role_icon(role_name, data)
+    generated = 0
+    if target in ("all", "characters"):
+        generated += generate_character(role_name, data, character_svg)
+    if target in ("all", "reminders") and data.get("reminders"):
+        generated += generate_reminders(role_name, data, reminder_svg)
+    return generated
+
+
+def main(target="all", role_filter=None, jobs=1):
     roles = json.loads(Path("roles.json").read_text(encoding="utf-8"))
     for directory in (
         "pngs",
@@ -273,16 +296,30 @@ def main(target="all", role_filter=None):
             Path("stls/reminder_base.stl"),
         )
 
-    for role_name, data in roles.items():
-        if role_filter and role_name.casefold() != role_filter.casefold():
-            continue
-        if target == "reminders" and not data.get("reminders"):
-            continue
-        character_svg, reminder_svg = prepare_role_icon(role_name, data)
-        if target in ("all", "characters"):
-            generate_character(role_name, data, character_svg)
-        if target in ("all", "reminders") and data.get("reminders"):
-            generate_reminders(role_name, data, reminder_svg)
+    selected_roles = [
+        (role_name, data)
+        for role_name, data in roles.items()
+        if (not role_filter or role_name.casefold() == role_filter.casefold())
+        and (target != "reminders" or data.get("reminders"))
+    ]
+    if role_filter and not selected_roles:
+        raise ValueError(f"No matching role with requested output: {role_filter}")
+
+    completed = 0
+    generated = 0
+    with ThreadPoolExecutor(max_workers=jobs) as executor:
+        futures = {
+            executor.submit(generate_role, role_name, data, target): role_name
+            for role_name, data in selected_roles
+        }
+        for future in as_completed(futures):
+            role_name = futures[future]
+            generated += future.result()
+            completed += 1
+            print(
+                f"[{completed}/{len(selected_roles)}] {role_name} "
+                f"({generated} new STL files)"
+            )
 
 
 if __name__ == "__main__":
@@ -297,5 +334,14 @@ if __name__ == "__main__":
         "--role",
         help="Generate only one role (case-insensitive), useful for test prints.",
     )
+    parser.add_argument(
+        "--jobs",
+        type=int,
+        default=1,
+        metavar="N",
+        help="Run N roles in parallel (recommended on most computers: 4).",
+    )
     args = parser.parse_args()
-    main(args.target, args.role)
+    if args.jobs < 1:
+        parser.error("--jobs must be at least 1")
+    main(args.target, args.role, args.jobs)
