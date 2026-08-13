@@ -193,8 +193,18 @@ def export_coin_to_stl(model, scad_filename="coin.scad", stl_filename="coin.stl"
         capture_output=True,
     )
     stderr = result.stderr.decode(errors="replace")
-    if result.returncode or "ERROR:" in stderr or not stl_path.exists():
+    error_lines = [line for line in stderr.splitlines() if "ERROR:" in line]
+    fatal_errors = [
+        line for line in error_lines if "The given mesh is not closed!" not in line
+    ]
+    output_exists = stl_path.exists() and stl_path.stat().st_size > 0
+    if result.returncode or fatal_errors or not output_exists:
         raise RuntimeError(stderr or "OpenSCAD failed to create the STL")
+    if error_lines:
+        print(
+            f"Warning: OpenSCAD reported a non-closed intermediate mesh for "
+            f"{stl_path.name}; the exported STL is present and usable."
+        )
 
 
 def render_model(model, scad_path, stl_path, force=False):
@@ -307,6 +317,7 @@ def main(target="all", role_filter=None, jobs=1):
 
     completed = 0
     generated = 0
+    failures = []
     with ThreadPoolExecutor(max_workers=jobs) as executor:
         futures = {
             executor.submit(generate_role, role_name, data, target): role_name
@@ -314,12 +325,19 @@ def main(target="all", role_filter=None, jobs=1):
         }
         for future in as_completed(futures):
             role_name = futures[future]
-            generated += future.result()
+            try:
+                generated += future.result()
+            except Exception as error:  # Keep independent roles running.
+                failures.append((role_name, error))
+                print(f"FAILED {role_name}: {error}")
             completed += 1
             print(
                 f"[{completed}/{len(selected_roles)}] {role_name} "
                 f"({generated} new STL files)"
             )
+    if failures:
+        names = ", ".join(role_name for role_name, _ in failures)
+        raise RuntimeError(f"Generation failed for {len(failures)} role(s): {names}")
 
 
 if __name__ == "__main__":

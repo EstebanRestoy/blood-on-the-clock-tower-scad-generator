@@ -92,6 +92,35 @@ def test_render_model_skips_existing_stl(tmp_path, monkeypatch):
     export.assert_not_called()
 
 
+@patch("solid_maker.subprocess.run")
+def test_export_accepts_non_closed_intermediate_when_stl_exists(mock_run, tmp_path):
+    stl_path = tmp_path / "usable.stl"
+
+    def create_stl(*args, **kwargs):
+        stl_path.write_bytes(b"solid token\nendsolid token\n")
+        return MagicMock(
+            returncode=0,
+            stderr=b"ERROR: The given mesh is not closed! Unable to convert.\n",
+        )
+
+    mock_run.side_effect = create_stl
+    solid_maker.export_coin_to_stl(MagicMock(), "token.scad", stl_path)
+    assert stl_path.stat().st_size > 0
+
+
+@patch("solid_maker.subprocess.run")
+def test_export_rejects_other_openscad_errors(mock_run, tmp_path):
+    stl_path = tmp_path / "incomplete.stl"
+
+    def create_bad_stl(*args, **kwargs):
+        stl_path.write_bytes(b"partial")
+        return MagicMock(returncode=0, stderr=b"ERROR: Can't open file 'icon.svg'\n")
+
+    mock_run.side_effect = create_bad_stl
+    with pytest.raises(RuntimeError, match="Can't open file"):
+        solid_maker.export_coin_to_stl(MagicMock(), "token.scad", stl_path)
+
+
 def test_roles_json_reminder_arrays_are_not_deduplicated(tmp_path):
     data = {
         "Shabaloth": {
