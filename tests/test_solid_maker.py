@@ -32,14 +32,25 @@ def test_curved_text_spacing_adapts_generically_to_token_size(monkeypatch):
     monkeypatch.setattr(
         solid_maker,
         "get_relative_widths_pillow",
-        lambda font, size, characters: {character: 10 for character in characters},
+        lambda font, size, characters: {character: 1000 for character in characters},
     )
 
     label, character_steps = solid_maker.curved_text_layout("Dead", 45, 4)
     _, reminder_steps = solid_maker.curved_text_layout("Dead", 25, 3)
+    reminder_label, reminder_case_steps = solid_maker.curved_text_layout(
+        "Dead",
+        25,
+        3,
+        solid_maker.REMINDER_FONT_FILE,
+        uppercase=False,
+        tracking_mm=0.54,
+        max_angle=180,
+    )
     _, long_steps = solid_maker.curved_text_layout("Final Night No Attack", 25, 2.1)
 
     assert label == "DEAD"
+    assert reminder_label == "Dead"
+    assert reminder_case_steps
     assert sum(reminder_steps) > sum(character_steps)
     assert sum(long_steps) == pytest.approx(210)
 

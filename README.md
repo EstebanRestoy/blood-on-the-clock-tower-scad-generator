@@ -4,6 +4,11 @@ Generate complete and two-part models for Blood on the Clocktower character and
 reminder tokens. Character tokens are 45 mm; reminder tokens are 25 mm. The
 1.8 mm base and 0.2 mm top inlay have an assembled height of 2 mm.
 
+Character names use the bundled Dumbledor 1 font. Reminder labels preserve
+the official title casing and use bundled Barlow Condensed SemiBold, a freely
+redistributable close substitute for the commercial condensed sans-serif used
+on the physical reminders. OpenSCAD is automatically pointed at both fonts.
+
 ## Instructions
 
 1. Install the dependencies in the `requirements.txt` file:

@@ -5,6 +5,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from io import BytesIO
 import json
 import math
+import os
 from pathlib import Path
 import re
 import shutil
@@ -30,6 +31,8 @@ COIN_HEIGHT = 2
 ROLE_EXTRUDE_DEPTH = 0.2
 FONT = "Dumbledor 1 Fixed"
 FONT_FILE = "assets/Dumbledor1_fixed.ttf"
+REMINDER_FONT = "Barlow Condensed:style=SemiBold"
+REMINDER_FONT_FILE = "assets/BarlowCondensed-SemiBold.ttf"
 TEXT_SIZE = 4
 REMINDER_TEXT_SIZE = 3
 
@@ -71,14 +74,14 @@ def safe_filename(value):
 
 
 def get_relative_widths_pillow(font_path, font_size, characters):
-    """Return the rendered width of every character in ``characters``."""
+    """Return the typographic advance of every character in ``characters``."""
     try:
         font = ImageFont.truetype(font_path, font_size)
     except OSError:
         print(f"Error: Font file not found at {font_path}")
         return {}
 
-    return {char: font.getbbox(char)[2] for char in characters}
+    return {char: float(font.getlength(char)) for char in characters}
 
 
 def felt_coin_model(diameter=COIN_DIAMETER):
@@ -86,35 +89,62 @@ def felt_coin_model(diameter=COIN_DIAMETER):
     return cylinder(d=diameter, h=COIN_HEIGHT - ROLE_EXTRUDE_DEPTH)
 
 
-def curved_text_layout(label, diameter, text_size):
+def curved_text_layout(
+    label,
+    diameter,
+    text_size,
+    font_file=FONT_FILE,
+    uppercase=True,
+    tracking_mm=0.4,
+    max_angle=210,
+):
     """Return the normalized label and generic angular spacing for its glyphs."""
-    printed_label = label.upper()
-    widths = get_relative_widths_pillow(
-        FONT_FILE, max(1, round(text_size * 5)), printed_label
-    )
+    printed_label = label.upper() if uppercase else label
+    # Measure at high resolution, then convert font advances to millimetres.
+    # This avoids the rounding errors that made some small reminder glyphs
+    # touch while other pairs had visibly larger gaps.
+    measurement_size = 1000
+    widths = get_relative_widths_pillow(font_file, measurement_size, printed_label)
     if not widths:
-        raise RuntimeError(f"Unable to load token font: {FONT_FILE}")
-    widths[" "] = max(widths.get(" ", 0), round(text_size * 3.5))
+        raise RuntimeError(f"Unable to load token font: {font_file}")
+    widths[" "] = max(widths.get(" ", 0), measurement_size * 0.45)
+    widths_mm = {
+        character: width / measurement_size * text_size
+        for character, width in widths.items()
+    }
 
-    steps = [
-        (widths[left] + widths[right]) / 2
+    physical_steps = [
+        (widths_mm[left] + widths_mm[right]) / 2 + tracking_mm
         for left, right in zip(printed_label, printed_label[1:], strict=False)
     ]
-    # Long reminder labels are compressed around the arc instead of spilling
-    # onto the upper half of the token.
-    # The same glyph width needs a larger angle on a smaller token. Without
-    # this radius compensation, reminder letters overlap one another.
-    radius_compensation = COIN_DIAMETER / diameter
-    steps = [step * radius_compensation for step in steps]
+    radius = diameter / 2 - max(1.5, text_size / 2)
+    steps = [math.degrees(step / radius) for step in physical_steps]
     total_angle = sum(steps)
-    fit_scale = min(1.0, 210 / total_angle) if total_angle else 1.0
+    fit_scale = min(1.0, max_angle / total_angle) if total_angle else 1.0
     steps = [step * fit_scale for step in steps]
     return printed_label, steps
 
 
-def curved_text_model(label, diameter, text_size):
+def curved_text_model(
+    label,
+    diameter,
+    text_size,
+    font=FONT,
+    font_file=FONT_FILE,
+    uppercase=True,
+    tracking_mm=0.4,
+    max_angle=210,
+):
     """Lay out a label along the lower edge of a token."""
-    printed_label, steps = curved_text_layout(label, diameter, text_size)
+    printed_label, steps = curved_text_layout(
+        label,
+        diameter,
+        text_size,
+        font_file,
+        uppercase,
+        tracking_mm,
+        max_angle,
+    )
 
     angle = 270 - sum(steps) / 2
     radius = diameter / 2 - max(1.5, text_size / 2)
@@ -126,7 +156,7 @@ def curved_text_model(label, diameter, text_size):
         y = radius * math.sin(math.radians(angle))
         character = scad_text(
             char,
-            font=FONT,
+            font=font,
             size=text_size,
             halign="center",
             valign="bottom",
@@ -141,7 +171,17 @@ def curved_text_model(label, diameter, text_size):
 
 
 def token_overlay_model(
-    label, svg_filename, diameter, text_size, icon_scale=1.0, icon_offset_y=0
+    label,
+    svg_filename,
+    diameter,
+    text_size,
+    icon_scale=1.0,
+    icon_offset_y=0,
+    text_font=FONT,
+    text_font_file=FONT_FILE,
+    uppercase=True,
+    tracking_mm=0.4,
+    max_text_angle=210,
 ):
     """Create the icon and text body used as the token's second colour."""
     # SCAD files live in nested output directories. An absolute POSIX-style
@@ -155,7 +195,16 @@ def token_overlay_model(
     )
     extruded_svg = linear_extrude(height=ROLE_EXTRUDE_DEPTH)(centered_svg)
     extruded_svg = translate((0, 0, COIN_HEIGHT - ROLE_EXTRUDE_DEPTH))(extruded_svg)
-    return extruded_svg + curved_text_model(label, diameter, text_size)
+    return extruded_svg + curved_text_model(
+        label,
+        diameter,
+        text_size,
+        text_font,
+        text_font_file,
+        uppercase,
+        tracking_mm,
+        max_text_angle,
+    )
 
 
 def role_overlay_model(role_name, svg_filename):
@@ -177,6 +226,11 @@ def reminder_overlay_model(reminder_label, svg_filename):
         size,
         icon_scale=0.58,
         icon_offset_y=1.5,
+        text_font=REMINDER_FONT,
+        text_font_file=REMINDER_FONT_FILE,
+        uppercase=False,
+        tracking_mm=size * 0.18,
+        max_text_angle=180,
     )
 
 
@@ -226,9 +280,18 @@ def export_coin_to_stl(model, scad_filename="coin.scad", stl_filename="coin.stl"
     """Render an existing SCAD file to STL with OpenSCAD."""
     stl_path = Path(stl_filename)
     stl_path.unlink(missing_ok=True)
+    environment = os.environ.copy()
+    bundled_fonts = str(Path("assets").resolve())
+    existing_font_path = environment.get("OPENSCAD_FONT_PATH")
+    environment["OPENSCAD_FONT_PATH"] = (
+        bundled_fonts + os.pathsep + existing_font_path
+        if existing_font_path
+        else bundled_fonts
+    )
     result = subprocess.run(
         [find_executable("openscad"), "-o", str(stl_path), str(scad_filename)],
         capture_output=True,
+        env=environment,
     )
     stderr = result.stderr.decode(errors="replace")
     error_lines = [line for line in stderr.splitlines() if "ERROR:" in line]
