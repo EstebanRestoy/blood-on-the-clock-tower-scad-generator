@@ -44,6 +44,12 @@ reminder tokens. Character tokens are 45 mm; reminder tokens are 25 mm. The
    Existing non-empty STL files are skipped, so an interrupted run resumes
    without rebuilding completed tokens.
 
+   Rebuild cached output after changing dimensions or text layout:
+
+   ```bash
+   python solid_maker.py --target reminders --jobs 4 --force
+   ```
+
    For a quick test print of one character and its reminders:
 
    ```bash
@@ -61,9 +67,10 @@ reminder tokens. Character tokens are 45 mm; reminder tokens are 25 mm. The
 - `3mf/characters/`: assembled two-part character tokens with millimetre units
 - `3mf/reminders/`: assembled two-part reminder tokens with millimetre units
 
-For Bambu Studio, OrcaSlicer, or PrusaSlicer, import the 3MF file. It contains
-the base and overlay grouped at the correct coordinates, declares millimetre
-units, and gives each part a suggested colour. The complete STL is provided for
+For Bambu Studio or OrcaSlicer, import the 3MF file. It contains the base and
+overlay grouped at the correct coordinates, declares millimetre units, and
+includes Bambu-compatible extruder assignments: black base on filament 1 and
+the team-coloured icon/text on filament 2. The complete STL is provided for
 single-colour printing. Files ending in `_01`, `_02`, and so on intentionally
 represent multiple copies of the same reminder.
 

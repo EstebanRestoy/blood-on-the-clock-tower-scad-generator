@@ -28,6 +28,22 @@ def test_felt_coin_model_supports_both_sizes():
     assert "d = 25" in scad_render(solid_maker.felt_coin_model(25))
 
 
+def test_curved_text_spacing_adapts_generically_to_token_size(monkeypatch):
+    monkeypatch.setattr(
+        solid_maker,
+        "get_relative_widths_pillow",
+        lambda font, size, characters: {character: 10 for character in characters},
+    )
+
+    label, character_steps = solid_maker.curved_text_layout("Dead", 45, 4)
+    _, reminder_steps = solid_maker.curved_text_layout("Dead", 25, 3)
+    _, long_steps = solid_maker.curved_text_layout("Final Night No Attack", 25, 2.1)
+
+    assert label == "DEAD"
+    assert sum(reminder_steps) > sum(character_steps)
+    assert sum(long_steps) == pytest.approx(210)
+
+
 @patch("solid_maker.requests.get")
 def test_download_png_normalizes_webp(mock_get, tmp_path):
     content = BytesIO()
@@ -63,9 +79,11 @@ def test_generate_reminders_preserves_duplicate_quantities(tmp_path, monkeypatch
     monkeypatch.setattr(
         solid_maker,
         "render_model",
-        lambda model, scad, stl: not rendered.append((str(scad), str(stl))),
+        lambda model, scad, stl, **kwargs: not rendered.append((str(scad), str(stl))),
     )
-    monkeypatch.setattr(solid_maker, "create_complete_token_files", lambda *args: 0)
+    monkeypatch.setattr(
+        solid_maker, "create_complete_token_files", lambda *args, **kwargs: 0
+    )
 
     solid_maker.generate_reminders(
         "Shabaloth",
@@ -154,6 +172,12 @@ def test_complete_outputs_include_base_and_declare_millimetres(tmp_path):
     assert model.GetMeshObjects().Count() == 2
     assert model.GetComponentsObjects().Count() == 1
     assert model.GetBuildItems().Count() == 1
+    with solid_maker.ZipFile(complete_3mf) as archive:
+        model_settings = archive.read("Metadata/model_settings.config").decode()
+        project_settings = json.loads(archive.read("Metadata/project_settings.config"))
+    assert 'key="extruder" value="1"' in model_settings
+    assert 'key="extruder" value="2"' in model_settings
+    assert project_settings["filament_colour"] == ["#141414", "#8C0E12"]
 
 
 def test_roles_json_reminder_arrays_are_not_deduplicated(tmp_path):
