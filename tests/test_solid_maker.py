@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, patch
 from PIL import Image
 import pytest
 from solid import scad_render
+import trimesh
 
 import solid_maker
 
@@ -64,6 +65,7 @@ def test_generate_reminders_preserves_duplicate_quantities(tmp_path, monkeypatch
         "render_model",
         lambda model, scad, stl: not rendered.append((str(scad), str(stl))),
     )
+    monkeypatch.setattr(solid_maker, "create_complete_token_files", lambda *args: 0)
 
     solid_maker.generate_reminders(
         "Shabaloth",
@@ -119,6 +121,39 @@ def test_export_rejects_other_openscad_errors(mock_run, tmp_path):
     mock_run.side_effect = create_bad_stl
     with pytest.raises(RuntimeError, match="Can't open file"):
         solid_maker.export_coin_to_stl(MagicMock(), "token.scad", stl_path)
+
+
+def test_complete_outputs_include_base_and_declare_millimetres(tmp_path):
+    base_path = tmp_path / "base.stl"
+    overlay_path = tmp_path / "overlay.stl"
+    complete_stl = tmp_path / "complete.stl"
+    complete_3mf = tmp_path / "complete.3mf"
+    base = trimesh.creation.cylinder(radius=12.5, height=1.8)
+    base.apply_translation((0, 0, 0.9))
+    overlay = trimesh.creation.box((8, 8, 0.2))
+    overlay.apply_translation((0, 0, 1.9))
+    base.export(base_path)
+    overlay.export(overlay_path)
+
+    generated = solid_maker.create_complete_token_files(
+        base_path,
+        overlay_path,
+        complete_stl,
+        complete_3mf,
+        "Test token",
+        "red",
+    )
+
+    completed_mesh = trimesh.load_mesh(complete_stl, process=True)
+    assert generated == 2
+    assert completed_mesh.extents == pytest.approx((25, 25, 2))
+    wrapper = solid_maker.lib3mf.get_wrapper()
+    model = wrapper.CreateModel()
+    model.QueryReader("3mf").ReadFromFile(str(complete_3mf))
+    assert model.GetUnit() == solid_maker.lib3mf.ModelUnit.MilliMeter
+    assert model.GetMeshObjects().Count() == 2
+    assert model.GetComponentsObjects().Count() == 1
+    assert model.GetBuildItems().Count() == 1
 
 
 def test_roles_json_reminder_arrays_are_not_deduplicated(tmp_path):

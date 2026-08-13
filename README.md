@@ -1,9 +1,8 @@
 # Blood on the Clock Tower SCAD Generator
 
-Generate two-part SCAD/STL models for Blood on the Clocktower character and
+Generate complete and two-part models for Blood on the Clocktower character and
 reminder tokens. Character tokens are 45 mm; reminder tokens are 25 mm. The
-1.8 mm base and 0.2 mm top inlay are separate bodies so they can be assigned
-different colours in a slicer; their assembled height is 2 mm.
+1.8 mm base and 0.2 mm top inlay have an assembled height of 2 mm.
 
 ## Instructions
 
@@ -57,11 +56,16 @@ different colours in a slicer; their assembled height is 2 mm.
 - `stls/reminder_base.stl`: reusable 25 mm base
 - `stls/characters/`: one character overlay per released role
 - `stls/reminders/`: one reminder overlay per required physical copy
+- `stls/characters_complete/`: complete single-colour 45 mm character tokens
+- `stls/reminders_complete/`: complete single-colour 25 mm reminder tokens
+- `3mf/characters/`: assembled two-part character tokens with millimetre units
+- `3mf/reminders/`: assembled two-part reminder tokens with millimetre units
 
-Import a base and its matching overlay together at the same coordinates as a
-multi-part object in your slicer. Duplicate the shared base for each overlay.
-Files ending in `_01`, `_02`, and so on intentionally represent multiple copies
-of the same reminder.
+For Bambu Studio, OrcaSlicer, or PrusaSlicer, import the 3MF file. It contains
+the base and overlay grouped at the correct coordinates, declares millimetre
+units, and gives each part a suggested colour. The complete STL is provided for
+single-colour printing. Files ending in `_01`, `_02`, and so on intentionally
+represent multiple copies of the same reminder.
 
 The role metadata and icons come from the official Blood on the Clocktower
 Online resources. Review the project's Community Created Content policy before

@@ -11,10 +11,12 @@ import shutil
 import subprocess
 
 import requests
+import lib3mf
 from PIL import Image, ImageFont
 from solid import cylinder, import_, linear_extrude, rotate, scad_render_to_file, scale
 from solid import text as scad_text
 from solid import translate, union
+import trimesh
 
 
 # Dimensional constants in mm. Character tokens are intentionally compatible
@@ -27,6 +29,16 @@ FONT = "Dumbledor 1 Fixed"
 FONT_FILE = "assets/Dumbledor1_fixed.ttf"
 TEXT_SIZE = 4
 REMINDER_TEXT_SIZE = 3
+
+BASE_COLOR = (235, 228, 205, 255)
+OVERLAY_COLORS = {
+    "blue": (50, 151, 244, 255),
+    "red": (140, 14, 18, 255),
+    "purple": (128, 0, 128, 255),
+    "yellow": (212, 175, 55, 255),
+    "green": (63, 150, 81, 255),
+    "unknown": (80, 80, 80, 255),
+}
 
 
 def find_executable(name):
@@ -217,6 +229,86 @@ def render_model(model, scad_path, stl_path, force=False):
     return True
 
 
+def add_3mf_mesh(model, mesh, name, materials, material_index):
+    """Add one trimesh body to a lib3mf model with an object-level material."""
+    mesh_object = model.AddMeshObject()
+    mesh_object.SetName(name)
+    vertices = [lib3mf.Position(tuple(vertex)) for vertex in mesh.vertices]
+    triangles = [
+        lib3mf.Triangle(tuple(int(index) for index in face)) for face in mesh.faces
+    ]
+    mesh_object.SetGeometry(vertices, triangles)
+    mesh_object.SetObjectLevelProperty(materials.GetResourceID(), material_index)
+    return mesh_object
+
+
+def create_complete_token_files(
+    base_stl,
+    overlay_stl,
+    complete_stl,
+    complete_3mf,
+    token_name,
+    color_name,
+    force=False,
+):
+    """Create a fused STL and an assembled two-part, millimetre-aware 3MF."""
+    complete_stl = Path(complete_stl)
+    complete_3mf = Path(complete_3mf)
+    outputs_missing = (
+        [complete_stl, complete_3mf]
+        if force
+        else [
+            path
+            for path in (complete_stl, complete_3mf)
+            if not path.exists() or path.stat().st_size == 0
+        ]
+    )
+    if not outputs_missing:
+        return 0
+
+    base_mesh = trimesh.load_mesh(base_stl, process=True)
+    overlay_mesh = trimesh.load_mesh(overlay_stl, process=True)
+    generated = 0
+
+    if complete_stl in outputs_missing:
+        complete_stl.parent.mkdir(parents=True, exist_ok=True)
+        combined = trimesh.util.concatenate((base_mesh, overlay_mesh))
+        temporary_stl = complete_stl.with_suffix(".tmp.stl")
+        combined.export(temporary_stl, file_type="stl")
+        temporary_stl.replace(complete_stl)
+        generated += 1
+
+    if complete_3mf in outputs_missing:
+        complete_3mf.parent.mkdir(parents=True, exist_ok=True)
+        wrapper = lib3mf.get_wrapper()
+        model = wrapper.CreateModel()
+        model.SetUnit(lib3mf.ModelUnit.MilliMeter)
+        materials = model.AddBaseMaterialGroup()
+        base_material = materials.AddMaterial("Token base", lib3mf.Color(*BASE_COLOR))
+        overlay_color = OVERLAY_COLORS.get(color_name, OVERLAY_COLORS["unknown"])
+        overlay_material = materials.AddMaterial(
+            f"{color_name.title()} overlay", lib3mf.Color(*overlay_color)
+        )
+        base_object = add_3mf_mesh(
+            model, base_mesh, "Token base", materials, base_material
+        )
+        overlay_object = add_3mf_mesh(
+            model, overlay_mesh, "Icon and text", materials, overlay_material
+        )
+        assembly = model.AddComponentsObject()
+        assembly.SetName(token_name)
+        identity = wrapper.GetIdentityTransform()
+        assembly.AddComponent(base_object, identity)
+        assembly.AddComponent(overlay_object, identity)
+        model.AddBuildItem(assembly, identity)
+        temporary_3mf = complete_3mf.with_suffix(".tmp.3mf")
+        model.QueryWriter("3mf").WriteToFile(str(temporary_3mf))
+        temporary_3mf.replace(complete_3mf)
+        generated += 1
+
+    return generated
+
+
 def prepare_role_icon(role_name, data):
     role_safe = safe_filename(role_name)
     png_path = Path("pngs") / f"{role_safe}.png"
@@ -237,13 +329,24 @@ def prepare_role_icon(role_name, data):
 def generate_character(role_name, data, svg_path):
     role_safe = safe_filename(role_name)
     overlay = role_overlay_model(role_name, svg_path)
-    return int(
+    overlay_stl = Path("stls/characters") / f"{data['color']}_{role_safe}_overlay.stl"
+    generated = int(
         render_model(
             overlay,
             Path("scads/characters") / f"{role_safe}_overlay.scad",
-            Path("stls/characters") / f"{data['color']}_{role_safe}_overlay.stl",
+            overlay_stl,
         )
     )
+    complete_name = f"{data['color']}_{role_safe}"
+    generated += create_complete_token_files(
+        Path("stls/character_base.stl"),
+        overlay_stl,
+        Path("stls/characters_complete") / f"{complete_name}.stl",
+        Path("3mf/characters") / f"{complete_name}.3mf",
+        role_name,
+        data["color"],
+    )
+    return generated
 
 
 def generate_reminders(role_name, data, svg_path):
@@ -259,12 +362,24 @@ def generate_reminders(role_name, data, svg_path):
         suffix = f"_{seen[label]:02d}" if totals[label] > 1 else ""
         token_name = f"{role_safe}__{safe_filename(label)}{suffix}"
         overlay = reminder_overlay_model(label, svg_path)
+        overlay_stl = (
+            Path("stls/reminders") / f"{data['color']}_{token_name}_overlay.stl"
+        )
         generated += int(
             render_model(
                 overlay,
                 Path("scads/reminders") / f"{token_name}_overlay.scad",
-                Path("stls/reminders") / f"{data['color']}_{token_name}_overlay.stl",
+                overlay_stl,
             )
+        )
+        complete_name = f"{data['color']}_{token_name}"
+        generated += create_complete_token_files(
+            Path("stls/reminder_base.stl"),
+            overlay_stl,
+            Path("stls/reminders_complete") / f"{complete_name}.stl",
+            Path("3mf/reminders") / f"{complete_name}.3mf",
+            f"{role_name} — {label}",
+            data["color"],
         )
     return generated
 
@@ -290,6 +405,10 @@ def main(target="all", role_filter=None, jobs=1):
         "scads/reminders",
         "stls/characters",
         "stls/reminders",
+        "stls/characters_complete",
+        "stls/reminders_complete",
+        "3mf/characters",
+        "3mf/reminders",
     ):
         Path(directory).mkdir(parents=True, exist_ok=True)
 
@@ -333,7 +452,7 @@ def main(target="all", role_filter=None, jobs=1):
             completed += 1
             print(
                 f"[{completed}/{len(selected_roles)}] {role_name} "
-                f"({generated} new STL files)"
+                f"({generated} new output files)"
             )
     if failures:
         names = ", ".join(role_name for role_name, _ in failures)
