@@ -27,6 +27,13 @@ TEAM_COLORS = {
     "loric": "green",
 }
 
+# The app data omits a few physical setup reminders that are still listed in
+# the official edition products. Keep them here so refreshing roles.json does
+# not silently make an incomplete printable set.
+PHYSICAL_REMINDER_OVERRIDES = {
+    "drunk": ["Is The Drunk"],
+}
+
 
 def character_image_url(role):
     """Return the official app's icon URL, including alignment when required."""
@@ -41,6 +48,10 @@ def character_image_url(role):
 def normalise_role(role):
     """Convert an official role record to the generator's compact schema."""
     team = role["team"]
+    reminders = list(role.get("reminders", []))
+    for reminder in PHYSICAL_REMINDER_OVERRIDES.get(role["id"], []):
+        if reminder not in reminders:
+            reminders.append(reminder)
     return {
         "id": role["id"],
         "edition": role.get("edition", "experimental"),
@@ -48,7 +59,7 @@ def normalise_role(role):
         "image": character_image_url(role),
         "color": TEAM_COLORS.get(team, "unknown"),
         # Do not deduplicate: repeated labels mean repeated physical tokens.
-        "reminders": list(role.get("reminders", [])),
+        "reminders": reminders,
     }
 
 

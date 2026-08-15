@@ -17,6 +17,20 @@ def test_normalise_role_keeps_duplicate_reminders():
     assert result["image"].endswith("/bmr/shabaloth_e.webp")
 
 
+def test_normalise_role_adds_missing_physical_setup_reminders():
+    role = {
+        "id": "drunk",
+        "name": "Drunk",
+        "edition": "tb",
+        "team": "outsider",
+        "reminders": [],
+    }
+
+    result = get_all_roles.normalise_role(role)
+
+    assert result["reminders"] == ["Is The Drunk"]
+
+
 def test_fetch_roles_uses_official_data():
     response = MagicMock()
     response.json.return_value = [

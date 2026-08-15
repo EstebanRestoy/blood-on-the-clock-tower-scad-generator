@@ -74,6 +74,16 @@ build plate for a clean first-layer finish.
    python solid_maker.py --role Washerwoman
    ```
 
+5. Group an official edition into print folders and create a multi-plate Bambu
+   Studio project (Travellers are kept in a separate optional folder):
+
+   ```bash
+   python print_set_maker.py --edition tb
+   ```
+
+   The project layout targets a 256 x 256 mm Bambu Lab X2D plate and reserves
+   the right side for a purge tower.
+
 ## Output
 
 - `stls/character_base.stl`: reusable 45 mm base
@@ -84,6 +94,8 @@ build plate for a clean first-layer finish.
 - `stls/reminders_complete/`: complete single-colour 25 mm reminder tokens
 - `3mf/characters/`: assembled two-part character tokens with millimetre units
 - `3mf/reminders/`: assembled two-part reminder tokens with millimetre units
+- `print_sets/<edition>/`: scenario folders, optional Travellers and a Bambu
+  Studio multi-plate project
 
 For Bambu Studio or OrcaSlicer, import the 3MF file. It contains the base and
 overlay grouped at the correct coordinates, declares millimetre units, and
