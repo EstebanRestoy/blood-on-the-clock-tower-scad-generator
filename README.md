@@ -7,7 +7,18 @@ reminder tokens. Character tokens are 45 mm; reminder tokens are 25 mm. The
 Character names use the bundled Dumbledor 1 font. Reminder labels preserve
 the official title casing and use bundled Barlow Condensed SemiBold, a freely
 redistributable close substitute for the commercial condensed sans-serif used
-on the physical reminders. OpenSCAD is automatically pointed at both fonts.
+on the physical reminders. Character-name tracking is increased to match the
+wide letter spacing of the physical tokens. Dumbledor's very thin strokes are
+also expanded before extrusion so a 0.4 mm FDM nozzle does not omit parts of
+the letters. The generator measures the actual OpenSCAD glyph outlines once
+and optically centres every curved label by its visible left/right margins.
+OpenSCAD is automatically pointed at both fonts.
+
+As in the working reference 3MF, the base remains a full 2 mm thick and the
+coloured icon/text occupy the first 0.2 mm inside it. Each volume is centred
+individually and placed with a 3MF component transform so Bambu Studio keeps the
+two materials aligned. Generated files open with the decorated face against the
+build plate for a clean first-layer finish.
 
 ## Instructions
 

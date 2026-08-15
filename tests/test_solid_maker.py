@@ -24,8 +24,13 @@ def test_convert_png_to_greyscale_png(test_image_path, tmp_path):
 
 
 def test_felt_coin_model_supports_both_sizes():
-    assert "cylinder" in str(solid_maker.felt_coin_model(45))
-    assert "d = 25" in scad_render(solid_maker.felt_coin_model(25))
+    character = scad_render(solid_maker.felt_coin_model(45))
+    reminder = scad_render(solid_maker.felt_coin_model(25))
+
+    assert "d = 45" in character
+    assert "h = 2" in character
+    assert "d = 25" in reminder
+    assert "h = 2" in reminder
 
 
 def test_curved_text_spacing_adapts_generically_to_token_size(monkeypatch):
@@ -53,6 +58,48 @@ def test_curved_text_spacing_adapts_generically_to_token_size(monkeypatch):
     assert reminder_case_steps
     assert sum(reminder_steps) > sum(character_steps)
     assert sum(long_steps) == pytest.approx(210)
+
+
+def test_character_tracking_matches_official_token_proportions(monkeypatch):
+    monkeypatch.setattr(
+        solid_maker,
+        "get_relative_widths_pillow",
+        lambda font, size, characters: {character: 600 for character in characters},
+    )
+    _, compact = solid_maker.curved_text_layout("Goblin", 45, 4, tracking_mm=0.4)
+    _, official_style = solid_maker.curved_text_layout(
+        "Goblin", 45, 4, tracking_mm=solid_maker.CHARACTER_TRACKING_MM
+    )
+
+    assert sum(official_style) > sum(compact)
+
+
+def test_optical_centering_uses_visible_glyph_geometry(monkeypatch):
+    key = solid_maker.glyph_outline_key(solid_maker.FONT, 4, 0.18, "A")
+    monkeypatch.setitem(
+        solid_maker.GLYPH_OUTLINES,
+        key,
+        solid_maker.np.array([[-1.0, 0.0], [2.0, 0.0]]),
+    )
+
+    correction = solid_maker.curved_text_optical_offset_x(
+        "A", [], 45, 4, solid_maker.FONT, 0.18
+    )
+
+    assert correction == pytest.approx(-0.5)
+
+
+def test_character_text_is_expanded_for_a_point_four_mm_nozzle(tmp_path):
+    model = solid_maker.role_overlay_model("Goblin", tmp_path / "Goblin.svg")
+    rendered = scad_render(model)
+
+    assert "offset(r = 0.1800000000)" in rendered
+
+
+def test_reminder_text_does_not_use_character_font_expansion(tmp_path):
+    model = solid_maker.reminder_overlay_model("Dead", tmp_path / "Imp.svg")
+
+    assert "offset(" not in scad_render(model)
 
 
 @patch("solid_maker.requests.get")
@@ -157,8 +204,8 @@ def test_complete_outputs_include_base_and_declare_millimetres(tmp_path):
     overlay_path = tmp_path / "overlay.stl"
     complete_stl = tmp_path / "complete.stl"
     complete_3mf = tmp_path / "complete.3mf"
-    base = trimesh.creation.cylinder(radius=12.5, height=1.8)
-    base.apply_translation((0, 0, 0.9))
+    base = trimesh.creation.cylinder(radius=12.5, height=2)
+    base.apply_translation((0, 0, 1))
     overlay = trimesh.creation.box((8, 8, 0.2))
     overlay.apply_translation((0, 0, 1.9))
     base.export(base_path)
@@ -184,8 +231,11 @@ def test_complete_outputs_include_base_and_declare_millimetres(tmp_path):
     assert model.GetComponentsObjects().Count() == 1
     assert model.GetBuildItems().Count() == 1
     with solid_maker.ZipFile(complete_3mf) as archive:
+        core_model = archive.read("3D/3dmodel.model").decode()
         model_settings = archive.read("Metadata/model_settings.config").decode()
         project_settings = json.loads(archive.read("Metadata/project_settings.config"))
+    assert 'transform="1 0 0 0 -1 0 0 0 -1 0 0 1"' in core_model
+    assert 'transform="1 0 0 0 1 0 0 0 1 0 0 0.9"' in core_model
     assert 'key="extruder" value="1"' in model_settings
     assert 'key="extruder" value="2"' in model_settings
     assert project_settings["filament_colour"] == ["#141414", "#8C0E12"]

@@ -16,8 +16,17 @@ from zipfile import ZIP_DEFLATED, ZipFile
 
 import requests
 import lib3mf
+import numpy as np
 from PIL import Image, ImageFont
-from solid import cylinder, import_, linear_extrude, rotate, scad_render_to_file, scale
+from solid import (
+    cylinder,
+    import_,
+    linear_extrude,
+    offset,
+    rotate,
+    scad_render_to_file,
+    scale,
+)
 from solid import text as scad_text
 from solid import translate, union
 import trimesh
@@ -35,6 +44,11 @@ REMINDER_FONT = "Barlow Condensed:style=SemiBold"
 REMINDER_FONT_FILE = "assets/BarlowCondensed-SemiBold.ttf"
 TEXT_SIZE = 4
 REMINDER_TEXT_SIZE = 3
+CHARACTER_TRACKING_MM = 1.1
+# Dumbledor has hairline strokes which a 0.4 mm FDM nozzle can omit. Expanding
+# each glyph in 2D by this radius adds 0.36 mm to its thinnest strokes before
+# extrusion, while keeping the original typeface and its counters recognizable.
+CHARACTER_TEXT_EXPANSION_MM = 0.18
 
 BASE_COLOR = (20, 20, 20, 255)
 OVERLAY_COLORS = {
@@ -45,6 +59,10 @@ OVERLAY_COLORS = {
     "green": (63, 150, 81, 255),
     "unknown": (80, 80, 80, 255),
 }
+
+# Populated once before token workers start. Each entry contains the actual XY
+# vertices exported by OpenSCAD for one glyph, including any stroke expansion.
+GLYPH_OUTLINES = {}
 
 
 def color_to_hex(color):
@@ -85,8 +103,107 @@ def get_relative_widths_pillow(font_path, font_size, characters):
 
 
 def felt_coin_model(diameter=COIN_DIAMETER):
-    """Create the base below the 0.2 mm inlay/overlay layer."""
-    return cylinder(d=diameter, h=COIN_HEIGHT - ROLE_EXTRUDE_DEPTH)
+    """Create the full-height base used by the original multipart tokens."""
+    return cylinder(d=diameter, h=COIN_HEIGHT)
+
+
+def glyph_outline_key(font, text_size, text_expansion_mm, character):
+    return (font, float(text_size), float(text_expansion_mm), character)
+
+
+def render_glyph_outline(spec, character):
+    """Render and cache the exact OpenSCAD outline of one printable glyph."""
+    font, font_file, text_size, text_expansion_mm = spec
+    key = glyph_outline_key(font, text_size, text_expansion_mm, character)
+    if character.isspace():
+        GLYPH_OUTLINES[key] = np.empty((0, 2))
+        return
+
+    font_path = Path(font_file)
+    font_version = font_path.stat().st_mtime_ns if font_path.exists() else 0
+    cache_dir = Path(".tools/optical_glyphs")
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    cache_name = safe_filename(
+        f"{font}_{text_size:g}_{text_expansion_mm:g}_{font_version}_{ord(character):04x}"
+    )
+    scad_path = cache_dir / f"{cache_name}.scad"
+    stl_path = cache_dir / f"{cache_name}.stl"
+    if not stl_path.exists() or stl_path.stat().st_size == 0:
+        glyph = scad_text(
+            character,
+            font=font,
+            size=text_size,
+            halign="center",
+            valign="bottom",
+        )
+        if text_expansion_mm:
+            glyph = offset(r=text_expansion_mm)(glyph)
+        model = linear_extrude(height=ROLE_EXTRUDE_DEPTH)(glyph)
+        scad_render_to_file(
+            model,
+            str(scad_path),
+            file_header="$fn=100;",
+            include_orig_code=False,
+        )
+        export_coin_to_stl(model, scad_path, stl_path)
+
+    mesh = trimesh.load(stl_path, force="mesh", process=False)
+    GLYPH_OUTLINES[key] = np.asarray(mesh.vertices[:, :2])
+
+
+def prepare_optical_glyphs(specs, jobs=1):
+    """Prepare each font/size/glyph variant once, in parallel when requested."""
+    requests_to_prepare = {
+        (spec, character)
+        for printed_label, spec in specs
+        for character in printed_label
+        if glyph_outline_key(spec[0], spec[2], spec[3], character)
+        not in GLYPH_OUTLINES
+    }
+    if not requests_to_prepare:
+        return
+    with ThreadPoolExecutor(max_workers=min(jobs, len(requests_to_prepare))) as executor:
+        futures = [
+            executor.submit(render_glyph_outline, spec, character)
+            for spec, character in requests_to_prepare
+        ]
+        for future in as_completed(futures):
+            future.result()
+    print(f"Prepared {len(requests_to_prepare)} optical glyph metric(s)")
+
+
+def curved_text_optical_offset_x(
+    printed_label,
+    steps,
+    diameter,
+    text_size,
+    font,
+    text_expansion_mm,
+):
+    """Return the X correction that balances the visible left/right margins."""
+    angle = 270 - sum(steps) / 2
+    radius = diameter / 2 - max(1.5, text_size / 2)
+    left = math.inf
+    right = -math.inf
+    for index, character in enumerate(printed_label):
+        if index:
+            angle += steps[index - 1]
+        outline = GLYPH_OUTLINES.get(
+            glyph_outline_key(font, text_size, text_expansion_mm, character)
+        )
+        if outline is None or not len(outline):
+            continue
+        radians = math.radians(angle)
+        rotation = math.radians(angle + 90)
+        center_x = radius * math.cos(radians)
+        projected_x = (
+            center_x
+            + outline[:, 0] * math.cos(rotation)
+            - outline[:, 1] * math.sin(rotation)
+        )
+        left = min(left, float(projected_x.min()))
+        right = max(right, float(projected_x.max()))
+    return -(left + right) / 2 if math.isfinite(left) else 0
 
 
 def curved_text_layout(
@@ -134,6 +251,8 @@ def curved_text_model(
     uppercase=True,
     tracking_mm=0.4,
     max_angle=210,
+    text_expansion_mm=0,
+    optical_center=True,
 ):
     """Lay out a label along the lower edge of a token."""
     printed_label, steps = curved_text_layout(
@@ -161,13 +280,27 @@ def curved_text_model(
             halign="center",
             valign="bottom",
         )
+        if text_expansion_mm:
+            character = offset(r=text_expansion_mm)(character)
         character_3d = linear_extrude(height=ROLE_EXTRUDE_DEPTH)(character)
         parts.append(
             translate((x, y, COIN_HEIGHT - ROLE_EXTRUDE_DEPTH))(
                 rotate(a=angle + 90, v=[0, 0, 1])(character_3d)
             )
         )
-    return union()(*parts)
+    curved_text = union()(*parts)
+    if optical_center:
+        correction_x = curved_text_optical_offset_x(
+            printed_label,
+            steps,
+            diameter,
+            text_size,
+            font,
+            text_expansion_mm,
+        )
+        if correction_x:
+            curved_text = translate((correction_x, 0, 0))(curved_text)
+    return curved_text
 
 
 def token_overlay_model(
@@ -182,6 +315,7 @@ def token_overlay_model(
     uppercase=True,
     tracking_mm=0.4,
     max_text_angle=210,
+    text_expansion_mm=0,
 ):
     """Create the icon and text body used as the token's second colour."""
     # SCAD files live in nested output directories. An absolute POSIX-style
@@ -204,21 +338,34 @@ def token_overlay_model(
         uppercase,
         tracking_mm,
         max_text_angle,
+        text_expansion_mm,
     )
 
 
 def role_overlay_model(role_name, svg_filename):
     """Create a 45 mm character-token overlay."""
-    return token_overlay_model(role_name, svg_filename, COIN_DIAMETER, TEXT_SIZE)
+    return token_overlay_model(
+        role_name,
+        svg_filename,
+        COIN_DIAMETER,
+        TEXT_SIZE,
+        tracking_mm=CHARACTER_TRACKING_MM,
+        text_expansion_mm=CHARACTER_TEXT_EXPANSION_MM,
+    )
+
+
+def reminder_text_size(reminder_label):
+    """Choose the generic reminder size used by both layout and metrics."""
+    if len(reminder_label) > 18:
+        return 2.1
+    if len(reminder_label) > 12:
+        return 2.5
+    return REMINDER_TEXT_SIZE
 
 
 def reminder_overlay_model(reminder_label, svg_filename):
     """Create a 25 mm reminder-token overlay."""
-    size = REMINDER_TEXT_SIZE
-    if len(reminder_label) > 18:
-        size = 2.1
-    elif len(reminder_label) > 12:
-        size = 2.5
+    size = reminder_text_size(reminder_label)
     return token_overlay_model(
         reminder_label,
         svg_filename,
@@ -333,6 +480,25 @@ def add_3mf_mesh(model, mesh, name, materials, material_index):
 
 def add_xml_metadata(parent, key, value):
     ElementTree.SubElement(parent, "metadata", key=key, value=str(value))
+
+
+def translation_transform(wrapper, translation):
+    """Create a lib3mf translation transform."""
+    transform = wrapper.GetIdentityTransform()
+    for axis, value in enumerate(translation):
+        transform.Fields[3][axis] = float(value)
+    return transform
+
+
+def face_down_transform(wrapper, height=COIN_HEIGHT):
+    """Rotate a token 180 degrees around X and keep it on the build plate."""
+    transform = wrapper.GetIdentityTransform()
+    transform.Fields[1][1] = -1
+    transform.Fields[2][2] = -1
+    # 3MF meshes are centred around their own bounding boxes, as in the working
+    # reference project. The base therefore spans -height/2 .. +height/2.
+    transform.Fields[3][2] = height / 2
+    return transform
 
 
 def inject_bambu_metadata(
@@ -503,18 +669,35 @@ def create_complete_token_files(
         overlay_material = materials.AddMaterial(
             f"{color_name.title()} overlay", lib3mf.Color(*overlay_color)
         )
+        # Bambu Studio expects multipart meshes to be centred individually and
+        # positioned by component transforms. Supplying world-space vertices
+        # makes it re-centre each volume independently and can lift the overlay
+        # above the base when the project is opened.
+        base_center = base_mesh.bounds.mean(axis=0)
+        overlay_center = overlay_mesh.bounds.mean(axis=0)
+        base_3mf_mesh = base_mesh.copy()
+        overlay_3mf_mesh = overlay_mesh.copy()
+        base_3mf_mesh.apply_translation(-base_center)
+        overlay_3mf_mesh.apply_translation(-overlay_center)
         base_object = add_3mf_mesh(
-            model, base_mesh, "Token base", materials, base_material
+            model, base_3mf_mesh, "Token base", materials, base_material
         )
         overlay_object = add_3mf_mesh(
-            model, overlay_mesh, "Icon and text", materials, overlay_material
+            model, overlay_3mf_mesh, "Icon and text", materials, overlay_material
         )
         assembly = model.AddComponentsObject()
         assembly.SetName(token_name)
         identity = wrapper.GetIdentityTransform()
         assembly.AddComponent(base_object, identity)
-        assembly.AddComponent(overlay_object, identity)
-        model.AddBuildItem(assembly, identity)
+        overlay_position = overlay_center - base_center
+        assembly.AddComponent(
+            overlay_object, translation_transform(wrapper, overlay_position)
+        )
+        # Match the original project's Bambu file: the decorated 0.2 mm face
+        # starts on the build plate, giving the icon and text the cleanest face.
+        model.AddBuildItem(
+            assembly, face_down_transform(wrapper, float(base_mesh.extents[2]))
+        )
         temporary_3mf = complete_3mf.with_suffix(".tmp.3mf")
         model.QueryWriter("3mf").WriteToFile(str(temporary_3mf))
         inject_bambu_metadata(
@@ -645,12 +828,14 @@ def main(target="all", role_filter=None, jobs=1, force=False):
             felt_coin_model(COIN_DIAMETER),
             Path("scads/character_base.scad"),
             Path("stls/character_base.stl"),
+            force=force,
         )
     if target in ("all", "reminders"):
         render_model(
             felt_coin_model(REMINDER_DIAMETER),
             Path("scads/reminder_base.scad"),
             Path("stls/reminder_base.stl"),
+            force=force,
         )
 
     selected_roles = [
@@ -661,6 +846,26 @@ def main(target="all", role_filter=None, jobs=1, force=False):
     ]
     if role_filter and not selected_roles:
         raise ValueError(f"No matching role with requested output: {role_filter}")
+
+    optical_specs = []
+    if target in ("all", "characters"):
+        character_spec = (
+            FONT,
+            FONT_FILE,
+            TEXT_SIZE,
+            CHARACTER_TEXT_EXPANSION_MM,
+        )
+        optical_specs.extend(
+            (role_name.upper(), character_spec) for role_name, _ in selected_roles
+        )
+    if target in ("all", "reminders"):
+        for _, data in selected_roles:
+            for label in data.get("reminders", []):
+                size = reminder_text_size(label)
+                optical_specs.append(
+                    (label, (REMINDER_FONT, REMINDER_FONT_FILE, size, 0))
+                )
+    prepare_optical_glyphs(optical_specs, jobs)
 
     completed = 0
     generated = 0
