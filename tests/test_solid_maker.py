@@ -96,10 +96,16 @@ def test_character_text_is_expanded_for_a_point_four_mm_nozzle(tmp_path):
     assert "offset(r = 0.1800000000)" in rendered
 
 
-def test_reminder_text_does_not_use_character_font_expansion(tmp_path):
+def test_reminder_artwork_is_expanded_for_a_point_four_mm_nozzle(tmp_path):
     model = solid_maker.reminder_overlay_model("Dead", tmp_path / "Imp.svg")
+    rendered = scad_render(model)
 
-    assert "offset(" not in scad_render(model)
+    assert (
+        f"offset(r = {solid_maker.REMINDER_ICON_EXPANSION_MM:.10f})" in rendered
+    )
+    assert (
+        f"offset(r = {solid_maker.REMINDER_TEXT_EXPANSION_MM:.10f})" in rendered
+    )
 
 
 @patch("solid_maker.requests.get")

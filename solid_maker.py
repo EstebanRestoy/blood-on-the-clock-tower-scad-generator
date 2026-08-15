@@ -49,6 +49,11 @@ CHARACTER_TRACKING_MM = 1.1
 # each glyph in 2D by this radius adds 0.36 mm to its thinnest strokes before
 # extrusion, while keeping the original typeface and its counters recognizable.
 CHARACTER_TEXT_EXPANSION_MM = 0.18
+# Reminder artwork is scaled down to 25 mm, which can leave both the traced
+# icon and Barlow's narrow strokes below a 0.4 mm nozzle width.  Expand them
+# after scaling so the compensation is expressed in final printed millimetres.
+REMINDER_TEXT_EXPANSION_MM = 0.12
+REMINDER_ICON_EXPANSION_MM = 0.18
 
 BASE_COLOR = (20, 20, 20, 255)
 OVERLAY_COLORS = {
@@ -316,6 +321,7 @@ def token_overlay_model(
     tracking_mm=0.4,
     max_text_angle=210,
     text_expansion_mm=0,
+    icon_expansion_mm=0,
 ):
     """Create the icon and text body used as the token's second colour."""
     # SCAD files live in nested output directories. An absolute POSIX-style
@@ -327,6 +333,8 @@ def token_overlay_model(
             translate((-diameter / 2, -diameter / 2, 0))(svg_shape)
         )
     )
+    if icon_expansion_mm:
+        centered_svg = offset(r=icon_expansion_mm)(centered_svg)
     extruded_svg = linear_extrude(height=ROLE_EXTRUDE_DEPTH)(centered_svg)
     extruded_svg = translate((0, 0, COIN_HEIGHT - ROLE_EXTRUDE_DEPTH))(extruded_svg)
     return extruded_svg + curved_text_model(
@@ -378,6 +386,8 @@ def reminder_overlay_model(reminder_label, svg_filename):
         uppercase=False,
         tracking_mm=size * 0.18,
         max_text_angle=180,
+        text_expansion_mm=REMINDER_TEXT_EXPANSION_MM,
+        icon_expansion_mm=REMINDER_ICON_EXPANSION_MM,
     )
 
 
@@ -863,7 +873,15 @@ def main(target="all", role_filter=None, jobs=1, force=False):
             for label in data.get("reminders", []):
                 size = reminder_text_size(label)
                 optical_specs.append(
-                    (label, (REMINDER_FONT, REMINDER_FONT_FILE, size, 0))
+                    (
+                        label,
+                        (
+                            REMINDER_FONT,
+                            REMINDER_FONT_FILE,
+                            size,
+                            REMINDER_TEXT_EXPANSION_MM,
+                        ),
+                    )
                 )
     prepare_optical_glyphs(optical_specs, jobs)
 
